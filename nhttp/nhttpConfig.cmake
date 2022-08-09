@@ -1,0 +1,5 @@
+include(CMakeFindDependencyMacro)
+find_dependency(Boost 1.77.0 REQUIRED)
+find_dependency(OpenSSL 1.1.1 REQUIRED)
+find_dependency(ZLIB REQUIRED)
+include(${CMAKE_CURRENT_LIST_DIR}/nhttp.cmake)
