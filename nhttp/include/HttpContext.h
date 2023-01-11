@@ -363,9 +363,7 @@ public:
         HttpContext *httpContext;
 
         httpContext = (HttpContext *) us_create_socket_context(SSL, (us_loop_t *) loop, sizeof(HttpContextData<SSL>), options);
-        printf("HttpContext.h HttpContext::create SSL=%d\n", SSL);
         if (!httpContext) {
-            printf("HttpContext.h httpContext=null\n");
             return nullptr;
         }
 

@@ -457,7 +457,7 @@ SSL_CTX *create_ssl_context_from_options(struct us_socket_context_options_t opti
             free_ssl_context(ssl_context);
             return NULL;
         }
-        printf("openssl.c create_ssl_context_from_options, options.cert_file_name=%s\n", options.cert_file_name);
+        // printf("openssl.c create_ssl_context_from_options, options.cert_file_name=%s\n", options.cert_file_name);
     }
 
     /* Same as above - we can discard this string afterwards I suppose */
