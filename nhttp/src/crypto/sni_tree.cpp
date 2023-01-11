@@ -21,6 +21,7 @@
 #ifndef SNI_TREE_H
 #define SNI_TREE_H
 
+#ifndef LIBUS_NO_SSL
 
 #include <map>
 #include <memory>
@@ -214,3 +215,4 @@ extern "C" {
 
 #endif
 
+#endif

@@ -21,20 +21,8 @@
 #include <string>
 #include <charconv>
 #include <string_view>
-
+#include "util.h"
 namespace uWS {
-    /* Type queued up when publishing */
-    struct TopicTreeMessage {
-        std::string message;
-        /*OpCode*/ int opCode;
-        bool compress;
-    };
-    struct TopicTreeBigMessage {
-        std::string_view message;
-        /*OpCode*/ int opCode;
-        bool compress;
-    };
-
     /* Safari 15.0 - 15.3 has a completely broken compression implementation (client_no_context_takeover not
      * properly implemented) - so we fully disable compression for this browser :-(
      * see https://github.com/uNetworking/uWebSockets/issues/1347 */
@@ -97,6 +85,8 @@ private:
     /* WebSocketContexts are of differing type, but we as owners and creators must delete them correctly */
     std::vector<MoveOnlyFunction<void()>> webSocketContextDeleters;
 
+    std::vector<void *> webSocketContexts;
+
 public:
 
     TopicTree<TopicTreeMessage, TopicTreeBigMessage> *topicTree = nullptr;
@@ -104,11 +94,24 @@ public:
     /* Server name */
     TemplatedApp &&addServerName(std::string hostname_pattern, SocketContextOptions options = {}) {
 
-        us_socket_context_add_server_name(SSL, (struct us_socket_context_t *) httpContext, hostname_pattern.c_str(), options);
+        /* Do nothing if not even on SSL */
+        if constexpr (SSL) {
+            /* First we create a new router for this domain */
+            auto *domainRouter = new HttpRouter<typename HttpContextData<SSL>::RouterData>();
+
+            us_socket_context_add_server_name(SSL, (struct us_socket_context_t *) httpContext, hostname_pattern.c_str(), options, domainRouter);
+        }
+
         return std::move(*this);
     }
 
     TemplatedApp &&removeServerName(std::string hostname_pattern) {
+    
+        /* This will do for now, would be better if us_socket_context_remove_server_name returned the user data */
+        auto *domainRouter = us_socket_context_find_server_name_userdata(SSL, (struct us_socket_context_t *) httpContext, hostname_pattern.c_str());
+        if (domainRouter) {
+            delete (HttpRouter<typename HttpContextData<SSL>::RouterData> *) domainRouter;
+        }
 
         us_socket_context_remove_server_name(SSL, (struct us_socket_context_t *) httpContext, hostname_pattern.c_str());
         return std::move(*this);
@@ -136,8 +139,10 @@ public:
     }
 
     /* Attaches a "filter" function to track socket connections/disconnections */
-    void filter(MoveOnlyFunction<void(HttpResponse<SSL> *, int)> &&filterHandler) {
+    TemplatedApp &&filter(MoveOnlyFunction<void(HttpResponse<SSL> *, int)> &&filterHandler) {
         httpContext->filter(std::move(filterHandler));
+
+        return std::move(*this);
     }
 
     /* Publishes a message to all websocket contexts - conceptually as if publishing to the one single
@@ -202,6 +207,8 @@ public:
         /* Move webSocketContextDeleters */
         webSocketContextDeleters = std::move(other.webSocketContextDeleters);
 
+        webSocketContexts = std::move(other.webSocketContexts);
+
         /* Move TopicTree */
         topicTree = other.topicTree;
         other.topicTree = nullptr;
@@ -230,7 +237,7 @@ public:
         bool resetIdleTimeoutOnSend = false;
         /* A good default, esp. for newcomers */
         bool sendPingsAutomatically = true;
-        /* Maximum socket lifetime in seconds before forced closure (defaults to disabled) */
+        /* Maximum socket lifetime in minutes before forced closure (defaults to disabled) */
         unsigned short maxLifetime = 0;
         MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *, struct us_socket_context_t *)> upgrade = nullptr;
         MoveOnlyFunction<void(WebSocket<SSL, true, UserData> *)> open = nullptr;
@@ -238,8 +245,19 @@ public:
         MoveOnlyFunction<void(WebSocket<SSL, true, UserData> *)> drain = nullptr;
         MoveOnlyFunction<void(WebSocket<SSL, true, UserData> *, std::string_view)> ping = nullptr;
         MoveOnlyFunction<void(WebSocket<SSL, true, UserData> *, std::string_view)> pong = nullptr;
+        MoveOnlyFunction<void(WebSocket<SSL, true, UserData> *, std::string_view, int, int)> subscription = nullptr;
         MoveOnlyFunction<void(WebSocket<SSL, true, UserData> *, int, std::string_view)> close = nullptr;
     };
+
+    /* Closes all sockets including listen sockets. */
+    TemplatedApp &&close() {
+        us_socket_context_close(SSL, (struct us_socket_context_t *) httpContext);
+        for (void *webSocketContext : webSocketContexts) {
+            us_socket_context_close(SSL, (struct us_socket_context_t *) webSocketContext);
+        }
+
+        return std::move(*this);
+    }
 
     template <typename UserData>
     TemplatedApp &&ws(std::string pattern, WebSocketBehavior<UserData> &&behavior) {
@@ -257,8 +275,16 @@ public:
             std::terminate();
         }
 
-        if (behavior.idleTimeout % 4) {
-            std::cerr << "Warning: idleTimeout should be a multiple of 4!" << std::endl;
+        /* Maximum idleTimeout is 16 minutes */
+        if (behavior.idleTimeout > 240 * 4) {
+            std::cerr << "Error: idleTimeout must not be greater than 960 seconds!" << std::endl;
+            std::terminate();
+        }
+
+        /* Maximum maxLifetime is 4 hours */
+        if (behavior.maxLifetime > 240) {
+            std::cerr << "Error: maxLifetime must not be greater than 240 minutes!" << std::endl;
+            std::terminate();
         }
 
         /* If we don't have a TopicTree yet, create one now */
@@ -323,6 +349,9 @@ public:
             webSocketContext->free();
         });
 
+        /* We also keep this list for easy closing */
+        webSocketContexts.push_back((void *)webSocketContext);
+
         /* Quick fix to disable any compression if set */
 #ifdef UWS_NO_ZLIB
         behavior.compression = DISABLED;
@@ -344,6 +373,7 @@ public:
         webSocketContext->getExt()->openHandler = std::move(behavior.open);
         webSocketContext->getExt()->messageHandler = std::move(behavior.message);
         webSocketContext->getExt()->drainHandler = std::move(behavior.drain);
+        webSocketContext->getExt()->subscriptionHandler = std::move(behavior.subscription);
         webSocketContext->getExt()->closeHandler = std::move([closeHandler = std::move(behavior.close)](WebSocket<SSL, true, UserData> *ws, int code, std::string_view message) mutable {
             if (closeHandler) {
                 closeHandler(ws, code, message);
@@ -361,12 +391,13 @@ public:
         webSocketContext->getExt()->closeOnBackpressureLimit = behavior.closeOnBackpressureLimit;
         webSocketContext->getExt()->resetIdleTimeoutOnSend = behavior.resetIdleTimeoutOnSend;
         webSocketContext->getExt()->sendPingsAutomatically = behavior.sendPingsAutomatically;
+        webSocketContext->getExt()->maxLifetime = behavior.maxLifetime;
         webSocketContext->getExt()->compression = behavior.compression;
 
         /* Calculate idleTimeoutCompnents */
         webSocketContext->getExt()->calculateIdleTimeoutCompnents(behavior.idleTimeout);
 
-        httpContext->onHttp("get", pattern, [webSocketContext, behavior = std::move(behavior)](auto *res, auto *req) mutable {
+        httpContext->onHttp("GET", pattern, [webSocketContext, behavior = std::move(behavior)](auto *res, auto *req) mutable {
 
             /* If we have this header set, it's a websocket */
             std::string_view secWebSocketKey = req->getHeader("sec-websocket-key");
@@ -407,65 +438,242 @@ public:
         return std::move(*this);
     }
 
+    /* Browse to a server name, changing the router to this domain */
+    TemplatedApp &&domain(std::string serverName) {
+        HttpContextData<SSL> *httpContextData = httpContext->getSocketContextData();
+
+        void *domainRouter = us_socket_context_find_server_name_userdata(SSL, (struct us_socket_context_t *) httpContext, serverName.c_str());
+        if (domainRouter) {
+            std::cout << "Browsed to SNI: " << serverName << std::endl;
+            httpContextData->currentRouter = (decltype(httpContextData->currentRouter)) domainRouter;
+        } else {
+            std::cout << "Cannot browse to SNI: " << serverName << std::endl;
+            httpContextData->currentRouter = &httpContextData->router;
+        }
+    
+        return std::move(*this);
+    }
+    class AsyncFileStreamer: public std::enable_shared_from_this<AsyncFileStreamer>  {
+        std::string file_path_;
+        uint64_t file_len_, range_begin_, req_len_;
+        uWS::Loop *loop_;
+        enum{ buf_size = 131072}; 
+        // 128k buffer
+        std::array<char, buf_size> buff_;
+        std::shared_ptr<std::ifstream> ifs_;
+        uWS::HttpResponse<SSL> *res_;
+    public:
+        AsyncFileStreamer(std::string file_path, auto *res, auto *req)
+        : file_path_(file_path), range_begin_(0), res_(res)
+        {
+            // shared_from_this can not be call in constructor
+            // auto self = shared_from_this();
+            loop_ = uWS::Loop::get();
+            ifs_ = std::make_shared<std::ifstream>();
+            ifs_->open(file_path_, std::ifstream::in | std::ios::binary | std::ios::ate);
+            file_len_ = ifs_->tellg();
+            // printf("[%s] len=%llu\n", file_path.c_str(), file_len_);
+            // file_len_ = Util::file_size(file_path);
+            // printf("[%s] len=%llu\n", file_path.c_str(), file_len_);
+            // printf("print headers begin--------------------\n");
+            // for(auto i = req->begin(); i != req->end(); i++)
+            // {
+            //     std::cout << (*i).first << "=" << (*i).second << std::endl;
+            // }
+            // printf("print headers end-----------------------\n");
+            auto range = std::string{req->getHeader("range")};
+            req_len_ = file_len_;
+            if (!range.empty())
+            {
+                // std::cout << "received req range=" << range << std::endl;
+                boost::replace_all(range, "bytes=", "");
+                auto vs = Util::split(range, "-");
+                uint64_t begin = std::stoull(vs[0]);
+                uint64_t end = vs[1] == "" ? file_len_ : std::stoull(vs[1]);
+                // [begin, end] not [begin, end)
+                end = std::min(file_len_ - 1, end);
+                req_len_ = (end - begin) + 1;
+                range = "bytes " + vs[0] + "-" + std::to_string(end) + "/" + std::to_string(file_len_);
+                range_begin_ = begin;
+                // std::cout << "Content-Range=" << range << std::endl;
+                // writeStatus must be first call
+                res->writeStatus("206 Partial Content");
+                res->writeHeader("Content-Range", range);   
+            }
+            if (Util::is_pac(file_path_))
+            {
+                res->writeHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+            }
+            else
+            {
+                res->writeHeader("Cache-Control", "max-age=86400");
+            }
+            // for firefox need to know you can handle range seeking
+            res->writeHeader("Accept-Ranges", "bytes");
+            // res->writeHeader("Connection", "keep-alive");
+            // printf("file_len_=%llu, req_len_=%llu, range_begin_=%llu\n", file_len_, req_len_, range_begin_);
+            // res->tryEnd() already set "Content-Length"
+            // res->writeHeader("Content-Length", std::to_string(req_len_));
+            auto ft = Util::mime_type(file_path_);
+            // LOG("%1% file type = %2%", file_path_, ft)
+            res->writeHeader("Content-Type", ft);
+        }
+        static void serve(HttpResponse<SSL> *res, HttpRequest *req, fs::path path)
+        {
+            try
+            {
+                if (fs::is_directory(path))
+                {
+                    path /= "index.html";
+                }
+                else if (!fs::exists(path))
+                {
+                    // This is for spa routing
+                    path = path / "index.html";
+                }
+                if (!fs::exists(path))
+                {
+                    throw invalid_argument(path.string() + " not exist");
+                }
+                std::make_shared<AsyncFileStreamer>(path.string(), res, req)->streamFile();
+            }
+            catch (const exception &e)
+            {
+                res->writeStatus("404 Not Found");
+                res->writeHeader("Content-Type", "text/html; charset=utf-8");
+                res->end( boost::str(boost::format("<h1>404 Not Found</h1><i>%1%</i>") % e.what() ) );
+            }
+        }
+        void streamFile()
+        {
+            auto res = res_;
+            // can not set header in recursive func
+            auto self = this->shared_from_this();
+            if (!*ifs_)
+            {
+                // or try to reopen it?
+                ifs_->close();
+                std::cout << "Reopening fin:"<< file_path_ << std::endl;
+                ifs_->open(file_path_, std::ios::binary);
+                if( ! ifs_->good() ) throw std::invalid_argument(file_path_ + " not exist");;
+            }
+            ifs_->seekg(range_begin_ + res->getWriteOffset(), std::ios::beg);
+            std::streamsize rc = ifs_->read( &buff_[0], 
+                std::min(buff_.size(), 
+                static_cast<size_t>(file_len_ - range_begin_ )
+                - res->getWriteOffset()) ).gcount();
+            auto chunk = std::string_view(&buff_[0], rc);
+            if (chunk.length() == 0)
+            {
+                // printf("[%s] chunk.length() == 0, exit\n", file_path_.c_str());
+                return;
+            }
+                
+            // LOG("serve[%1%] %2%, req_len_=%3%", file_path_, chunk.size(), req_len_);
+            if (res->tryEnd(chunk, req_len_).first)
+            {
+                streamFile();
+            }
+            else
+            {
+                res->onWritable([self](int offset) {
+                    // printf("onWritable rewrite[%s] offset=%d\n", self->file_path_.c_str(), offset);
+                    // std::async(std::launch::async, [res, self]() {
+                    //     self->loop()->defer([res, self]() {
+                            self->streamFile();
+                    //     });
+                    // });
+                    return false;
+                })
+                ->onAborted([res, self]() {
+                    // printf("in abort, res->getWriteOffset=%u, file_path_=%s\n", 
+                    //     res->getWriteOffset(), self->file_path_.c_str());
+                    // std::cout << self->file_path_ << ": ABORTED!" << std::endl;
+                });
+            }
+        }
+    };
+    TemplatedApp&& serve_dir(std::string vp, fs::path dir)
+    {
+        return serve_dir(vp, dir.string() );
+    }
+    TemplatedApp &&serve_dir(std::string pattern, std::string dir) {
+        if(pattern[pattern.length()-1] != '/') pattern += "/";
+        auto vp = pattern + "*";
+        // LOG("before get serve_dir, vp=%1%", vp)
+        this->get(vp, [prefix=std::move(pattern),
+                        dir=std::move(dir)
+                      ](auto *res, auto *req) {
+            auto fn = string{req->getUrl()};
+            fn = fn.substr( prefix.length() );
+            // LOG("in serve_dir, fn=%1%", fn)
+            fn = Util::urlDecode(fn);
+            fs::path root_path{dir};
+            auto path = root_path / fn;
+            // LOG("get file %1%", path.string())
+            AsyncFileStreamer::serve(res, req, path);
+        });
+        return std::move(*this);
+    }
     TemplatedApp &&get(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("get", pattern, std::move(handler));
+            httpContext->onHttp("GET", pattern, std::move(handler));
         }
         return std::move(*this);
     }
 
     TemplatedApp &&post(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("post", pattern, std::move(handler));
+            httpContext->onHttp("POST", pattern, std::move(handler));
         }
         return std::move(*this);
     }
 
     TemplatedApp &&options(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("options", pattern, std::move(handler));
+            httpContext->onHttp("OPTIONS", pattern, std::move(handler));
         }
         return std::move(*this);
     }
 
     TemplatedApp &&del(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("delete", pattern, std::move(handler));
+            httpContext->onHttp("DELETE", pattern, std::move(handler));
         }
         return std::move(*this);
     }
 
     TemplatedApp &&patch(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("patch", pattern, std::move(handler));
+            httpContext->onHttp("PATCH", pattern, std::move(handler));
         }
         return std::move(*this);
     }
 
     TemplatedApp &&put(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("put", pattern, std::move(handler));
+            httpContext->onHttp("PUT", pattern, std::move(handler));
         }
         return std::move(*this);
     }
 
     TemplatedApp &&head(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("head", pattern, std::move(handler));
+            httpContext->onHttp("HEAD", pattern, std::move(handler));
         }
         return std::move(*this);
     }
 
     TemplatedApp &&connect(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("connect", pattern, std::move(handler));
+            httpContext->onHttp("CONNECT", pattern, std::move(handler));
         }
         return std::move(*this);
     }
 
     TemplatedApp &&trace(std::string pattern, MoveOnlyFunction<void(HttpResponse<SSL> *, HttpRequest *)> &&handler) {
         if (httpContext) {
-            httpContext->onHttp("trace", pattern, std::move(handler));
+            httpContext->onHttp("TRACE", pattern, std::move(handler));
         }
         return std::move(*this);
     }
@@ -505,6 +713,18 @@ public:
     /* Port, options, callback */
     TemplatedApp &&listen(int port, int options, MoveOnlyFunction<void(us_listen_socket_t *)> &&handler) {
         handler(httpContext ? httpContext->listen(nullptr, port, options) : nullptr);
+        return std::move(*this);
+    }
+
+    /* options, callback, path to unix domain socket */
+    TemplatedApp &&listen(int options, MoveOnlyFunction<void(us_listen_socket_t *)> &&handler, std::string path) {
+        handler(httpContext ? httpContext->listen(path.c_str(), options) : nullptr);
+        return std::move(*this);
+    }
+
+    /* callback, path to unix domain socket */
+    TemplatedApp &&listen(MoveOnlyFunction<void(us_listen_socket_t *)> &&handler, std::string path) {
+        handler(httpContext ? httpContext->listen(path.c_str(), 0) : nullptr);
         return std::move(*this);
     }
 

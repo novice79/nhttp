@@ -230,7 +230,7 @@ private:
                     }
 
                     /* Same here, we do not care for any particular smart allocation scheme */
-                    webSocketData->fragmentBuffer.resize(webSocketData->fragmentBuffer.length() - webSocketData->controlTipLength);
+                    webSocketData->fragmentBuffer.resize((unsigned int) webSocketData->fragmentBuffer.length() - webSocketData->controlTipLength);
                     webSocketData->controlTipLength = 0;
                 }
             }
@@ -257,6 +257,13 @@ private:
             if (!webSocketData->isShuttingDown) {
                 /* Emit close event */
                 auto *webSocketContextData = (WebSocketContextData<SSL, USERDATA> *) us_socket_context_ext(SSL, us_socket_context(SSL, (us_socket_t *) s));
+
+                /* At this point we iterate all currently held subscriptions and emit an event for all of them */
+                if (webSocketData->subscriber && webSocketContextData->subscriptionHandler) {
+                    for (Topic *t : webSocketData->subscriber->topics) {
+                        webSocketContextData->subscriptionHandler((WebSocket<SSL, isServer, USERDATA> *) s, t->name, (int) t->size() - 1, (int) t->size());
+                    }
+                }
 
                 /* Make sure to unsubscribe from any pub/sub node at exit */
                 webSocketContextData->topicTree->freeSubscriber(webSocketData->subscriber);
@@ -367,6 +374,12 @@ private:
 
             /* If we get a fin, we just close I guess */
             us_socket_close(SSL, (us_socket_t *) s, 0, nullptr);
+
+            return s;
+        });
+
+        us_socket_context_on_long_timeout(SSL, getSocketContext(), [](auto *s) {
+            ((WebSocket<SSL, isServer, USERDATA> *) s)->end(1000, "please reconnect");
 
             return s;
         });

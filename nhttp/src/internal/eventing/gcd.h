@@ -1,5 +1,5 @@
 /*
- * Authored by Alex Hultman, 2018-2021.
+ * Authored by Alex Hultman, 2018-2019.
  * Intellectual property of third-party.
 
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,31 +15,26 @@
  * limitations under the License.
  */
 
-#ifndef ASIO_H
-#define ASIO_H
+#ifndef GCD_H
+#define GCD_H
 
-#include "loop_data.h"
+#include "internal/loop_data.h"
 
+#include <dispatch/dispatch.h>
 #define LIBUS_SOCKET_READABLE 1
 #define LIBUS_SOCKET_WRITABLE 2
 
 struct us_loop_t {
     alignas(LIBUS_EXT_ALIGNMENT) struct us_internal_loop_data_t data;
 
-    // a loop is an io_context
-    void *io;
-
-    // whether or not we got an io_context as hint or not
-    int is_default;
+    dispatch_queue_t gcd_queue;
 };
 
-// it is no longer valid to cast a pointer to us_poll_t to a pointer of uv_poll_t
 struct us_poll_t {
-    void *boost_block;
-
+    int events;
+    dispatch_source_t gcd_read, gcd_write;
     LIBUS_SOCKET_DESCRIPTOR fd;
     unsigned char poll_type;
-    int events;
 };
 
-#endif // ASIO_H
+#endif // GCD_H

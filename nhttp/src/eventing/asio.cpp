@@ -17,11 +17,11 @@
 
 extern "C" {
     #include "libusockets.h"
-    #include "internal.h"
+    #include "internal/internal.h"
     #include <stdlib.h>
 }
 
-
+#ifdef LIBUS_USE_ASIO
 
 #include <boost/asio.hpp>
 #include <iostream>
@@ -29,9 +29,15 @@ extern "C" {
 #include <memory>
 #include <boost/version.hpp>
 
-
+// New interfaces require boost 1.66.0
+#if BOOST_VERSION < 106600
+#define LIBUS_USE_OLD_ASIO
+#define LIBUS_ASIO_DESCRIPTOR boost::asio::posix::stream_descriptor
+#define LIBUS_ASIO_LOOP boost::asio::io_service
+#else
 #define LIBUS_ASIO_DESCRIPTOR boost::asio::posix::descriptor
 #define LIBUS_ASIO_LOOP boost::asio::io_context
+#endif
 
 // setting polls to 1 disables fallthrough
 int polls = 0; // temporary solution keeping track of outstanding work
@@ -82,6 +88,7 @@ void us_poll_free(struct us_poll_t *p, struct us_loop_t *loop) {
 
 void poll_for_error(struct boost_block_poll_t *boost_block) {
     /* There is no such thing as polling for error in old asio */
+#ifndef LIBUS_USE_OLD_ASIO
     polls++;
     boost_block->async_wait(boost::asio::posix::descriptor::wait_type::wait_error, [nr = boost_block->nr, weakBoostBlock = std::weak_ptr<boost_block_poll_t>(boost_block->isValid)](boost::system::error_code ec) {
         polls--;
@@ -105,6 +112,7 @@ void poll_for_error(struct boost_block_poll_t *boost_block) {
             us_internal_dispatch_ready_poll(boost_block->p, 1, LIBUS_SOCKET_READABLE | LIBUS_SOCKET_WRITABLE);
         }
     });
+#endif
 }
 
 void poll_for_read(struct boost_block_poll_t *boost_block);
@@ -132,10 +140,17 @@ inline void handle_read(const std::weak_ptr<boost_block_poll_t> &weakBoostBlock,
 
 void poll_for_read(struct boost_block_poll_t *boost_block) {
     polls++;
+#ifndef LIBUS_USE_OLD_ASIO
     boost_block->async_wait(boost::asio::posix::descriptor::wait_type::wait_read, [nr = boost_block->nr, weakBoostBlock = std::weak_ptr<boost_block_poll_t>(boost_block->isValid)](boost::system::error_code ec) {
         polls--;
         handle_read(weakBoostBlock, nr, ec);
     });
+#else
+    boost_block->async_read_some(boost::asio::null_buffers(), [nr = boost_block->nr, weakBoostBlock = std::weak_ptr<boost_block_poll_t>(boost_block->isValid)](boost::system::error_code ec, std::size_t) {
+        polls--;
+        handle_read(weakBoostBlock, nr, ec);
+    });
+#endif
 }
 
 void poll_for_write(struct boost_block_poll_t *boost_block);
@@ -162,11 +177,17 @@ inline void handle_write(const std::weak_ptr<boost_block_poll_t> &weakBoostBlock
 
 void poll_for_write(struct boost_block_poll_t *boost_block) {
     polls++;
+#ifndef LIBUS_USE_OLD_ASIO
     boost_block->async_wait(boost::asio::posix::descriptor::wait_type::wait_write, [nr = boost_block->nr, weakBoostBlock = std::weak_ptr<boost_block_poll_t>(boost_block->isValid)](boost::system::error_code ec) {
         polls--;
         handle_write(weakBoostBlock, nr, ec);
     });
-
+#else
+    boost_block->async_write_some(boost::asio::null_buffers(), [nr = boost_block->nr, weakBoostBlock = std::weak_ptr<boost_block_poll_t>(boost_block->isValid)](boost::system::error_code ec, std::size_t) {
+        polls--;
+        handle_write(weakBoostBlock, nr, ec);
+    });
+#endif
 }
 
 void us_poll_start(struct us_poll_t *p, struct us_loop_t *loop, int events) {
@@ -451,3 +472,4 @@ void us_internal_async_wakeup(struct us_internal_async *a) {
 
 }
 
+#endif

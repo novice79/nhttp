@@ -20,7 +20,7 @@
 #define __APPLE_USE_RFC_3542
 
 #include "libusockets.h"
-#include "internal.h"
+#include "internal/internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,7 +54,31 @@ struct us_internal_udp_packet_buffer {
 
 /* We need to emulate sendmmsg, recvmmsg on platform who don't have it */
 int bsd_sendmmsg(LIBUS_SOCKET_DESCRIPTOR fd, void *msgvec, unsigned int vlen, int flags) {
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(__APPLE__)
+
+struct mmsghdr {
+    struct msghdr msg_hdr;  /* Message header */
+    unsigned int  msg_len;  /* Number of bytes transmitted */
+};
+
+    struct mmsghdr *hdrs = (struct mmsghdr *) msgvec;
+
+    for (int i = 0; i < vlen; i++) {
+        int ret = sendmsg(fd, &hdrs[i].msg_hdr, flags);
+        if (ret == -1) {
+            if (i) {
+                return i;
+            } else {
+                return -1;
+            }
+        } else {
+            hdrs[i].msg_len = ret;
+        }
+    }
+
+    return vlen;
+
+#elif defined(_WIN32)
 
     struct us_internal_udp_packet_buffer *packet_buffer = (struct us_internal_udp_packet_buffer *) msgvec;
 
@@ -236,7 +260,7 @@ LIBUS_SOCKET_DESCRIPTOR apple_no_sigpipe(LIBUS_SOCKET_DESCRIPTOR fd) {
 #ifdef __APPLE__
     if (fd != LIBUS_SOCKET_ERROR) {
         int no_sigpipe = 1;
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(int));
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, (void *) &no_sigpipe, sizeof(int));
     }
 #endif
     return fd;
@@ -259,7 +283,7 @@ void bsd_socket_flush(LIBUS_SOCKET_DESCRIPTOR fd) {
     // Linux TCP_CORK has the same underlying corking mechanism as with MSG_MORE
 #ifdef TCP_CORK
     int enabled = 0;
-    setsockopt(fd, IPPROTO_TCP, TCP_CORK, &enabled, sizeof(int));
+    setsockopt(fd, IPPROTO_TCP, TCP_CORK, (void *) &enabled, sizeof(int));
 #endif
 }
 
@@ -446,27 +470,27 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket(const char *host, int port, int
 #ifdef _WIN32
         if (options & LIBUS_LISTEN_EXCLUSIVE_PORT) {
             int optval2 = 1;
-            setsockopt(listenFd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, &optval2, sizeof(optval2));
+            setsockopt(listenFd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (void *) &optval2, sizeof(optval2));
         } else {
             int optval3 = 1;
-            setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (SETSOCKOPT_PTR_TYPE) &optval3, sizeof(optval3));
+            setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (void *) &optval3, sizeof(optval3));
         }
 #else
     #if /*defined(__linux) &&*/ defined(SO_REUSEPORT)
         if (!(options & LIBUS_LISTEN_EXCLUSIVE_PORT)) {
             int optval = 1;
-            setsockopt(listenFd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
+            setsockopt(listenFd, SOL_SOCKET, SO_REUSEPORT, (void *) &optval, sizeof(optval));
         }
     #endif
         int enabled = 1;
-        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (SETSOCKOPT_PTR_TYPE) &enabled, sizeof(enabled));
+        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (void *) &enabled, sizeof(enabled));
 #endif
 
     }
     
 #ifdef IPV6_V6ONLY
     int disabled = 0;
-    setsockopt(listenFd, IPPROTO_IPV6, IPV6_V6ONLY, (SETSOCKOPT_PTR_TYPE) &disabled, sizeof(disabled));
+    setsockopt(listenFd, IPPROTO_IPV6, IPV6_V6ONLY, (void *) &disabled, sizeof(disabled));
 #endif
 
     if (bind(listenFd, listenAddr->ai_addr, (socklen_t) listenAddr->ai_addrlen) || listen(listenFd, 512)) {
@@ -476,6 +500,50 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket(const char *host, int port, int
     }
 
     freeaddrinfo(result);
+    return listenFd;
+}
+
+#ifndef _WIN32
+#include <sys/un.h>
+#else
+#include <afunix.h>
+#include <io.h>
+#endif
+#include <sys/stat.h>
+#include <stddef.h>
+LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket_unix(const char *path, int options) {
+
+    LIBUS_SOCKET_DESCRIPTOR listenFd = LIBUS_SOCKET_ERROR;
+
+    listenFd = bsd_create_socket(AF_UNIX, SOCK_STREAM, 0);
+
+    if (listenFd == LIBUS_SOCKET_ERROR) {
+        return LIBUS_SOCKET_ERROR;
+    }
+
+#ifndef _WIN32
+    // 700 permission by default
+    fchmod(listenFd, S_IRWXU);
+#else
+    _chmod(path, S_IREAD | S_IWRITE | S_IEXEC);
+#endif
+
+    struct sockaddr_un server_address;
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.sun_family = AF_UNIX;
+    strcpy(server_address.sun_path, path);
+    int size = offsetof(struct sockaddr_un, sun_path) + strlen(server_address.sun_path);
+#ifdef _WIN32
+    _unlink(path);
+#else
+    unlink(path);
+#endif
+
+    if (bind(listenFd, (struct sockaddr *)&server_address, size) || listen(listenFd, 512)) {
+        bsd_close_socket(listenFd);
+        return LIBUS_SOCKET_ERROR;
+    }
+
     return listenFd;
 }
 
@@ -518,12 +586,12 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_udp_socket(const char *host, int port) {
     if (port != 0) {
         /* Should this also go for UDP? */
         int enabled = 1;
-        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (SETSOCKOPT_PTR_TYPE) &enabled, sizeof(enabled));
+        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (void *) &enabled, sizeof(enabled));
     }
     
 #ifdef IPV6_V6ONLY
     int disabled = 0;
-    setsockopt(listenFd, IPPROTO_IPV6, IPV6_V6ONLY, (SETSOCKOPT_PTR_TYPE) &disabled, sizeof(disabled));
+    setsockopt(listenFd, IPPROTO_IPV6, IPV6_V6ONLY, (void *) &disabled, sizeof(disabled));
 #endif
 
     /* We need destination address for udp packets in both ipv6 and ipv4 */
@@ -534,9 +602,9 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_udp_socket(const char *host, int port) {
 #endif
 
     int enabled = 1;
-    if (setsockopt(listenFd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &enabled, sizeof(enabled)) == -1) {
+    if (setsockopt(listenFd, IPPROTO_IPV6, IPV6_RECVPKTINFO, (void *) &enabled, sizeof(enabled)) == -1) {
         if (errno == 92) {
-            if (setsockopt(listenFd, IPPROTO_IP, IP_PKTINFO, &enabled, sizeof(enabled)) != 0) {
+            if (setsockopt(listenFd, IPPROTO_IP, IP_PKTINFO, (void *) &enabled, sizeof(enabled)) != 0) {
                 printf("Error setting IPv4 pktinfo!\n");
             }
         } else {
@@ -545,9 +613,9 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_udp_socket(const char *host, int port) {
     }
 
     /* These are used for getting the ECN */
-    if (setsockopt(listenFd, IPPROTO_IPV6, IPV6_RECVTCLASS, &enabled, sizeof(enabled)) == -1) {
+    if (setsockopt(listenFd, IPPROTO_IPV6, IPV6_RECVTCLASS, (void *) &enabled, sizeof(enabled)) == -1) {
         if (errno == 92) {
-            if (setsockopt(listenFd, IPPROTO_IP, IP_RECVTOS, &enabled, sizeof(enabled)) != 0) {
+            if (setsockopt(listenFd, IPPROTO_IP, IP_RECVTOS, (void *) &enabled, sizeof(enabled)) != 0) {
                 printf("Error setting IPv4 ECN!\n");
             }
         } else {
@@ -622,6 +690,8 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket(const char *host, int port, co
             int ret = bind(fd, interface_result->ai_addr, (socklen_t) interface_result->ai_addrlen);
             freeaddrinfo(interface_result);
             if (ret == LIBUS_SOCKET_ERROR) {
+                bsd_close_socket(fd);
+                freeaddrinfo(result);
                 return LIBUS_SOCKET_ERROR;
             }
         }
@@ -629,6 +699,25 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket(const char *host, int port, co
 
     connect(fd, result->ai_addr, (socklen_t) result->ai_addrlen);
     freeaddrinfo(result);
+
+    return fd;
+}
+
+LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket_unix(const char *server_path, int options) {
+
+    struct sockaddr_un server_address;
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.sun_family = AF_UNIX;
+    strcpy(server_address.sun_path, server_path);
+    int size = offsetof(struct sockaddr_un, sun_path) + strlen(server_address.sun_path);
+
+    LIBUS_SOCKET_DESCRIPTOR fd = bsd_create_socket(AF_UNIX, SOCK_STREAM, 0);
+
+    if (fd == LIBUS_SOCKET_ERROR) {
+        return LIBUS_SOCKET_ERROR;
+    }
+
+    connect(fd, (struct sockaddr *)&server_address, size);
 
     return fd;
 }

@@ -7,6 +7,7 @@ endif()
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+add_compile_definitions(LIBUS_USE_OPENSSL LIBUS_USE_ASIO)
 file(GLOB_RECURSE SOURCE_FILES 
     "src/*.cpp" 
     "src/*.c" 
@@ -20,6 +21,7 @@ endif()
 add_library(${PROJECT_NAME} STATIC ${SOURCE_FILES})
 set_target_properties(${PROJECT_NAME} PROPERTIES PUBLIC_HEADER "${HEADER_FILES}")
 include_directories("include")
+include_directories("src")
 set(Boost_USE_STATIC_LIBS        ON) # only find static libs
 set(Boost_USE_MULTITHREADED      ON)
 set(Boost_USE_STATIC_RUNTIME    OFF)

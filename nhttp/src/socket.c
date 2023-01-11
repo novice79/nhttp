@@ -16,7 +16,7 @@
  */
 
 #include "libusockets.h"
-#include "internal.h"
+#include "internal/internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -53,9 +53,17 @@ struct us_socket_context_t *us_socket_context(int ssl, struct us_socket_t *s) {
 
 void us_socket_timeout(int ssl, struct us_socket_t *s, unsigned int seconds) {
     if (seconds) {
-        s->timeout = 0x2000 | (s->context->timestamp + ((seconds + 3) >> 2));
+        s->timeout = ((unsigned int)s->context->timestamp + ((seconds + 3) >> 2)) % 240;
     } else {
-        s->timeout = 0;
+        s->timeout = 255;
+    }
+}
+
+void us_socket_long_timeout(int ssl, struct us_socket_t *s, unsigned int minutes) {
+    if (minutes) {
+        s->long_timeout = ((unsigned int)s->context->long_timestamp + minutes) % 240;
+    } else {
+        s->long_timeout = 255;
     }
 }
 
@@ -77,7 +85,7 @@ int us_socket_is_established(int ssl, struct us_socket_t *s) {
 /* Exactly the same as us_socket_close but does not emit on_close event */
 struct us_socket_t *us_socket_close_connecting(int ssl, struct us_socket_t *s) {
     if (!us_socket_is_closed(0, s)) {
-        us_internal_socket_context_unlink(s->context, s);
+        us_internal_socket_context_unlink_socket(s->context, s);
         us_poll_stop((struct us_poll_t *) s, s->context->loop);
         bsd_close_socket(us_poll_fd((struct us_poll_t *) s));
 
@@ -107,7 +115,7 @@ struct us_socket_t *us_socket_close(int ssl, struct us_socket_t *s, int code, vo
             s->next = 0;
             s->low_prio_state = 0;
         } else {
-            us_internal_socket_context_unlink(s->context, s);
+            us_internal_socket_context_unlink_socket(s->context, s);
         }
         us_poll_stop((struct us_poll_t *) s, s->context->loop);
         bsd_close_socket(us_poll_fd((struct us_poll_t *) s));
@@ -127,17 +135,21 @@ struct us_socket_t *us_socket_close(int ssl, struct us_socket_t *s, int code, vo
 /* Not shared with SSL */
 
 void *us_socket_get_native_handle(int ssl, struct us_socket_t *s) {
+#ifndef LIBUS_NO_SSL
     if (ssl) {
         return us_internal_ssl_socket_get_native_handle((struct us_internal_ssl_socket_t *) s);
     }
+#endif
 
     return (void *) (uintptr_t) us_poll_fd((struct us_poll_t *) s);
 }
 
 int us_socket_write(int ssl, struct us_socket_t *s, const char *data, int length, int msg_more) {
+#ifndef LIBUS_NO_SSL
     if (ssl) {
         return us_internal_ssl_socket_write((struct us_internal_ssl_socket_t *) s, data, length, msg_more);
     }
+#endif
 
     if (us_socket_is_closed(ssl, s) || us_socket_is_shut_down(ssl, s)) {
         return 0;
@@ -153,27 +165,32 @@ int us_socket_write(int ssl, struct us_socket_t *s, const char *data, int length
 }
 
 void *us_socket_ext(int ssl, struct us_socket_t *s) {
+#ifndef LIBUS_NO_SSL
     if (ssl) {
         return us_internal_ssl_socket_ext((struct us_internal_ssl_socket_t *) s);
     }
+#endif
 
     return s + 1;
 }
 
 int us_socket_is_shut_down(int ssl, struct us_socket_t *s) {
+#ifndef LIBUS_NO_SSL
     if (ssl) {
         return us_internal_ssl_socket_is_shut_down((struct us_internal_ssl_socket_t *) s);
     }
+#endif
 
     return us_internal_poll_type(&s->p) == POLL_TYPE_SOCKET_SHUT_DOWN;
 }
 
 void us_socket_shutdown(int ssl, struct us_socket_t *s) {
-
+#ifndef LIBUS_NO_SSL
     if (ssl) {
         us_internal_ssl_socket_shutdown((struct us_internal_ssl_socket_t *) s);
         return;
     }
+#endif
 
     /* Todo: should we emit on_close if calling shutdown on an already half-closed socket?
      * We need more states in that case, we need to track RECEIVED_FIN

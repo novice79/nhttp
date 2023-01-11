@@ -23,11 +23,23 @@
 #else
 #include <stdalign.h>
 #endif
-
+#include <stdint.h>
 /* We only have one networking implementation so far */
-#include "bsd.h"
-#include "asio.h"
+#include "internal/networking/bsd.h"
 
+/* We have many different eventing implementations */
+#if defined(LIBUS_USE_EPOLL) || defined(LIBUS_USE_KQUEUE)
+#include "internal/eventing/epoll_kqueue.h"
+#endif
+#ifdef LIBUS_USE_LIBUV
+#include "internal/eventing/libuv.h"
+#endif
+#ifdef LIBUS_USE_GCD
+#include "internal/eventing/gcd.h"
+#endif
+#ifdef LIBUS_USE_ASIO
+#include "internal/eventing/asio.h"
+#endif
 
 /* Poll type and what it polls for */
 enum {
@@ -70,16 +82,17 @@ void us_internal_init_loop_ssl_data(struct us_loop_t *loop);
 void us_internal_free_loop_ssl_data(struct us_loop_t *loop);
 
 /* Socket context related */
-void us_internal_socket_context_link(struct us_socket_context_t *context, struct us_socket_t *s);
-void us_internal_socket_context_unlink(struct us_socket_context_t *context, struct us_socket_t *s);
+void us_internal_socket_context_link_socket(struct us_socket_context_t *context, struct us_socket_t *s);
+void us_internal_socket_context_unlink_socket(struct us_socket_context_t *context, struct us_socket_t *s);
 
 /* Sockets are polls */
 struct us_socket_t {
-    alignas(LIBUS_EXT_ALIGNMENT) struct us_poll_t p;
+    alignas(LIBUS_EXT_ALIGNMENT) struct us_poll_t p; // 4 bytes
+    unsigned char timeout; // 1 byte
+    unsigned char long_timeout; // 1 byte
+    unsigned short low_prio_state; /* 0 = not in low-prio queue, 1 = is in low-prio queue, 2 = was in low-prio queue in this iteration */
     struct us_socket_context_t *context;
     struct us_socket_t *prev, *next;
-    unsigned short timeout : 14;
-    unsigned short low_prio_state : 2; /* 0 = not in low-prio queue, 1 = is in low-prio queue, 2 = was in low-prio queue in this iteration */
 };
 
 /* Internal callback types are polls just like sockets */
@@ -97,10 +110,17 @@ struct us_listen_socket_t {
     unsigned int socket_ext_size;
 };
 
+/* Listen sockets are keps in their own list */
+void us_internal_socket_context_link_listen_socket(struct us_socket_context_t *context, struct us_listen_socket_t *s);
+void us_internal_socket_context_unlink_listen_socket(struct us_socket_context_t *context, struct us_listen_socket_t *s);
+
 struct us_socket_context_t {
     alignas(LIBUS_EXT_ALIGNMENT) struct us_loop_t *loop;
-    unsigned short timestamp;
-    struct us_socket_t *head;
+    uint32_t global_tick;
+    unsigned char timestamp;
+    unsigned char long_timestamp;
+    struct us_socket_t *head_sockets;
+    struct us_listen_socket_t *head_listen_sockets;
     struct us_socket_t *iterator;
     struct us_socket_context_t *prev, *next;
 
@@ -110,6 +130,7 @@ struct us_socket_context_t {
     struct us_socket_t *(*on_close)(struct us_socket_t *, int code, void *reason);
     //void (*on_timeout)(struct us_socket_context *);
     struct us_socket_t *(*on_socket_timeout)(struct us_socket_t *);
+    struct us_socket_t *(*on_socket_long_timeout)(struct us_socket_t *);
     struct us_socket_t *(*on_end)(struct us_socket_t *);
     struct us_socket_t *(*on_connect_error)(struct us_socket_t *, int code);
     int (*is_low_prio)(struct us_socket_t *);
@@ -122,9 +143,11 @@ struct us_internal_ssl_socket_context_t;
 struct us_internal_ssl_socket_t;
 
 /* SNI functions */
-void us_internal_ssl_socket_context_add_server_name(struct us_internal_ssl_socket_context_t *context, const char *hostname_pattern, struct us_socket_context_options_t options);
+void us_internal_ssl_socket_context_add_server_name(struct us_internal_ssl_socket_context_t *context, const char *hostname_pattern, struct us_socket_context_options_t options, void *user);
 void us_internal_ssl_socket_context_remove_server_name(struct us_internal_ssl_socket_context_t *context, const char *hostname_pattern);
 void us_internal_ssl_socket_context_on_server_name(struct us_internal_ssl_socket_context_t *context, void (*cb)(struct us_internal_ssl_socket_context_t *, const char *));
+void *us_internal_ssl_socket_get_sni_userdata(struct us_internal_ssl_socket_t *s);
+void *us_internal_ssl_socket_context_find_server_name_userdata(struct us_internal_ssl_socket_context_t *context, const char *hostname_pattern);
 
 void *us_internal_ssl_socket_get_native_handle(struct us_internal_ssl_socket_t *s);
 void *us_internal_ssl_socket_context_get_native_handle(struct us_internal_ssl_socket_context_t *context);
@@ -148,6 +171,9 @@ void us_internal_ssl_socket_context_on_writable(struct us_internal_ssl_socket_co
 void us_internal_ssl_socket_context_on_timeout(struct us_internal_ssl_socket_context_t *context,
     struct us_internal_ssl_socket_t *(*on_timeout)(struct us_internal_ssl_socket_t *s));
 
+void us_internal_ssl_socket_context_on_long_timeout(struct us_internal_ssl_socket_context_t *context,
+    struct us_internal_ssl_socket_t *(*on_timeout)(struct us_internal_ssl_socket_t *s));
+
 void us_internal_ssl_socket_context_on_end(struct us_internal_ssl_socket_context_t *context,
     struct us_internal_ssl_socket_t *(*on_end)(struct us_internal_ssl_socket_t *s));
 
@@ -157,8 +183,15 @@ void us_internal_ssl_socket_context_on_connect_error(struct us_internal_ssl_sock
 struct us_listen_socket_t *us_internal_ssl_socket_context_listen(struct us_internal_ssl_socket_context_t *context,
     const char *host, int port, int options, int socket_ext_size);
 
+struct us_listen_socket_t *us_internal_ssl_socket_context_listen_unix(struct us_internal_ssl_socket_context_t *context,
+    const char *path, int options, int socket_ext_size);
+
 struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_connect(struct us_internal_ssl_socket_context_t *context,
     const char *host, int port, const char *source_host, int options, int socket_ext_size);
+
+    
+struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_connect_unix(struct us_internal_ssl_socket_context_t *context,
+    const char *server_path, int options, int socket_ext_size);
 
 int us_internal_ssl_socket_write(struct us_internal_ssl_socket_t *s, const char *data, int length, int msg_more);
 void us_internal_ssl_socket_timeout(struct us_internal_ssl_socket_t *s, unsigned int seconds);
