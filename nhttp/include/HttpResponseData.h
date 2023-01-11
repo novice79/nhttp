@@ -22,7 +22,6 @@
 
 #include "HttpParser.h"
 #include "AsyncSocketData.h"
-#include "ProxyParser.h"
 
 #include "MoveOnlyFunction.h"
 
@@ -82,9 +81,6 @@ private:
     /* Current state (content-length sent, status sent, write called, etc */
     int state = 0;
 
-#ifdef UWS_WITH_PROXY
-    ProxyParser proxyParser;
-#endif
 };
 
 }

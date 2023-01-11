@@ -186,16 +186,6 @@ private:
     }
 
 public:
-    /* If we have proxy support; returns the proxed source address as reported by the proxy. */
-#ifdef UWS_WITH_PROXY
-    std::string_view getProxiedRemoteAddress() {
-        return getHttpResponseData()->proxyParser.getSourceAddress();
-    }
-
-    std::string_view getProxiedRemoteAddressAsText() {
-        return Super::addressAsText(getProxiedRemoteAddress());
-    }
-#endif
 
     /* Manually upgrade to WebSocket. Typically called in upgrade handler. Immediately calls open handler.
      * NOTE: Will invalidate 'this' as socket might change location in memory. Throw away aftert use. */

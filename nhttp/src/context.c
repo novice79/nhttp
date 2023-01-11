@@ -18,8 +18,10 @@
 #include "libusockets.h"
 #include "internal.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
-
+// #include <boost/stacktrace.hpp>
+// #include <iostream>
 int default_is_low_prio_handler(struct us_socket_t *s) {
     return 0;
 }
@@ -132,10 +134,13 @@ struct us_socket_context_t *us_create_socket_context(int ssl, struct us_loop_t *
 #ifndef LIBUS_NO_SSL
     if (ssl) {
         /* This function will call us, again, with SSL = false and a bigger ext_size */
+        printf("context.c us_create_socket_context, ssl=true\n");
+        // std::cout << boost::stacktrace::stacktrace() << std::endl;
         return (struct us_socket_context_t *) us_internal_create_ssl_socket_context(loop, context_ext_size, options);
     }
 #endif
-
+    printf("context.c us_create_socket_context, ssl=false\n");
+    // std::cout << boost::stacktrace::stacktrace() << std::endl;
     /* This path is taken once either way - always BEFORE whatever SSL may do LATER.
      * context_ext_size will however be modified larger in case of SSL, to hold SSL extensions */
 

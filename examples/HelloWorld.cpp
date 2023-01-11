@@ -20,8 +20,8 @@ int main() {
 	std::cout<< s << std::endl;
 	/* Overly simple hello world app */
 	uWS::SSLApp({
-	  .key_file_name = "../misc/key.pem",
-	  .cert_file_name = "../misc/cert.pem"
+	  .key_file_name = "./misc/key.pem",
+	  .cert_file_name = "./misc/cert.pem"
 	}).get("/*", [](auto *res, auto */*req*/) {
 	    res->end("Hello world from novice!");
 	}).listen(3000, [](auto *listen_socket) {

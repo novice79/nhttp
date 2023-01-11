@@ -127,13 +127,9 @@ private:
             // clients need to know the cursor after http parse, not servers!
             // how far did we read then? we need to know to continue with websocket parsing data? or?
 
-            void *proxyParser = nullptr;
-#ifdef UWS_WITH_PROXY
-            proxyParser = &httpResponseData->proxyParser;
-#endif
 
             /* The return value is entirely up to us to interpret. The HttpParser only care for whether the returned value is DIFFERENT or not from passed user */
-            void *returnedSocket = httpResponseData->consumePostPadded(data, (unsigned int) length, s, proxyParser, [httpContextData](void *s, HttpRequest *httpRequest) -> void * {
+            void *returnedSocket = httpResponseData->consumePostPadded(data, (unsigned int) length, s, [httpContextData](void *s, HttpRequest *httpRequest) -> void * {
                 /* For every request we reset the timeout and hang until user makes action */
                 /* Warning: if we are in shutdown state, resetting the timer is a security issue! */
                 us_socket_timeout(SSL, (us_socket_t *) s, 0);
@@ -367,8 +363,9 @@ public:
         HttpContext *httpContext;
 
         httpContext = (HttpContext *) us_create_socket_context(SSL, (us_loop_t *) loop, sizeof(HttpContextData<SSL>), options);
-
+        printf("HttpContext.h HttpContext::create SSL=%d\n", SSL);
         if (!httpContext) {
+            printf("HttpContext.h httpContext=null\n");
             return nullptr;
         }
 

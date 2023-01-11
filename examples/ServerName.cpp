@@ -1,4 +1,4 @@
-#include "App.h"
+#include <nhttp/App.h>
 
 /* Note that uWS::SSLApp({options}) is the same as uWS::App() when compiled without SSL support */
 
@@ -7,18 +7,18 @@ struct us_listen_socket_t *globalListenSocket;
 int main() {
 	/* Overly simple hello world app (SNI) */
 	uWS::SSLApp app = uWS::SSLApp({
-	  .key_file_name = "../misc/key.pem",
-	  .cert_file_name = "../misc/cert.pem",
-	  .passphrase = "1234"
+	  .key_file_name = "misc/key.pem",
+	  .cert_file_name = "misc/cert.pem",
+	//   .passphrase = "1234"
 	}).missingServerName([&app](const char *hostname) {
 
 		printf("We are missing server name: <%s>\n", hostname);
 
 		/* Assume it is localhost, so add it */
 		app.addServerName("localhost", {
-			.key_file_name = "../misc/key.pem",
-			.cert_file_name = "../misc/cert.pem",
-			.passphrase = "1234"
+			.key_file_name = "misc/key.pem",
+			.cert_file_name = "misc/cert.pem",
+			// .passphrase = "1234"
 		});
 
 	}).get("/*", [](auto *res, auto */*req*/) {
@@ -38,9 +38,9 @@ int main() {
 
 	/* Let's add a wildcard SNI to begin with */
 	app.addServerName("*.google.*", {
-		.key_file_name = "../misc/key.pem",
-		.cert_file_name = "../misc/cert.pem",
-		.passphrase = "1234"
+		.key_file_name = "misc/key.pem",
+		.cert_file_name = "misc/cert.pem",
+		// .passphrase = "1234"
 	});
 
 	app.run();

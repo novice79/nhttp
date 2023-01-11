@@ -1,5 +1,5 @@
 /* We simply call the root header file "App.h", giving you uWS::App and uWS::SSLApp */
-#include "App.h"
+#include <nhttp/App.h>
 
 /* This is a simple WebSocket "sync" upgrade example.
  * You may compile it with "WITH_OPENSSL=1 make" or with "make" */
@@ -15,9 +15,9 @@ int main() {
      * You may swap to using uWS:App() if you don't need SSL */
     uWS::SSLApp({
         /* There are example certificates in uWebSockets.js repo */
-	    .key_file_name = "../misc/key.pem",
-	    .cert_file_name = "../misc/cert.pem",
-	    .passphrase = "1234"
+	    .key_file_name = "misc/key.pem",
+	    .cert_file_name = "misc/cert.pem",
+	    // .passphrase = "1234"
 	}).ws<PerSocketData>("/*", {
         /* Settings */
         .compression = uWS::SHARED_COMPRESSOR,

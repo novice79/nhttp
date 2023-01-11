@@ -10,7 +10,12 @@ set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin") 
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden -fvisibility-inlines-hidden")
 endif()
-add_executable(${PROJECT_NAME} "examples/HelloWorld.cpp")
+file(GLOB SOURCE_FILES  "*.cpp")
+foreach(file ${SOURCE_FILES})
+    get_filename_component(name "${file}" NAME_WE)
+    add_executable(${name} "${file}")
+    list(APPEND targets ${name})
+endforeach()
 
 # set(Boost_DEBUG ON)
 set(Boost_USE_STATIC_LIBS        ON) # only find static libs
@@ -66,23 +71,28 @@ message("nhttp_INCLUDE_DIRS=${nhttp_INCLUDE_DIRS}")
 get_target_property(nhttp_LIBRARIES nhttp::nhttp IMPORTED_LOCATION_RELEASE )
 message("nhttp_LIBRARIES=${nhttp_LIBRARIES}")
 message("nhttp_VERSION=${nhttp_VERSION}")
-target_link_libraries(
-    ${PROJECT_NAME} 
-    ${Boost_LIBRARIES}
-    ${OPENSSL_LIBRARIES}
-    ${ZLIB_LIBRARIES}
-    # ZLIB::ZLIB
-    nhttp::nhttp
-    ${CMAKE_DL_LIBS} 
-)
+
 set(STATIC_LINK " -s -static  -static-libstdc++ -static-libgcc")
 if (${CMAKE_HOST_SYSTEM_NAME} MATCHES "Linux")
     # set_property(TARGET ${PROJECT_NAME} APPEND_STRING PROPERTY LINK_FLAGS " ${STATIC_LINK}")
     string(APPEND CMAKE_EXE_LINKER_FLAGS "${STATIC_LINK}")
 endif ()
-# otool -L  dist/${PROJECT_NAME}
-install(TARGETS ${PROJECT_NAME} 
-    RUNTIME DESTINATION bin
-)
+foreach(t ${targets})
+    target_link_libraries(
+        ${t}
+        ${Boost_LIBRARIES}
+        ${OPENSSL_LIBRARIES}
+        ${ZLIB_LIBRARIES}
+        # ZLIB::ZLIB
+        nhttp::nhttp
+        ${CMAKE_DL_LIBS} 
+    )
+    if(WIN32)
+        target_link_libraries(${t} ws2_32 wsock32)
+    endif()
+    install(TARGETS ${t} RUNTIME DESTINATION bin)
+endforeach()
+
+# otool -L  dist/app
 
 

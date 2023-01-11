@@ -15,7 +15,7 @@ dist/
 !dist/init.lua
 *.crt
 *.key
-*.pem
+# *.pem
 *.db
 # executables
 http_examples

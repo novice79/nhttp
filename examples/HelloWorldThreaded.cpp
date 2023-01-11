@@ -1,4 +1,4 @@
-#include "App.h"
+#include <nhttp/App.h>
 #include <thread>
 #include <algorithm>
 #include <mutex>
@@ -15,9 +15,9 @@ int main() {
         return new std::thread([]() {
 
             uWS::SSLApp({
-                .key_file_name = "../misc/key.pem",
-                .cert_file_name = "../misc/cert.pem",
-                .passphrase = "1234"
+                .key_file_name = "misc/key.pem",
+                .cert_file_name = "misc/cert.pem",
+                // .passphrase = "1234"
             }).get("/*", [](auto *res, auto * /*req*/) {
                 res->end("Hello world!");
             }).listen(3000, [](auto *listen_socket) {
